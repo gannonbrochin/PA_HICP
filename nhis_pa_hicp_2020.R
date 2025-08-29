@@ -1,6 +1,7 @@
-
+#Author: Gannon Brochin
+#Date: 8/29/2025
 # NHIS 2020: PA vs HICP — Trend test, dose–response figure, adjusted rates, and TableOne
-# v14 (fix TableOne header rename; no education; outputs to working directory)
+
 #
 # Files written:
 #   - trend_test_2020.txt
