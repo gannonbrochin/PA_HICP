@@ -1,16 +1,7 @@
 #Author: Gannon Brochin
-#Date: 8/29/2025
+#Date: 10/27/2025
 # NHIS 2020: PA vs HICP — Trend test, dose–response figure, adjusted rates, and TableOne
 
-#
-# Files written:
-#   - trend_test_2020.txt
-#   - fig_dose_response_hicp_pa_2020.png
-#   - adjusted_rates_by_pa_2020.csv
-#   - adjusted_rates_by_pa_2020.docx
-#   - tableone_by_pa_2020.csv
-#   - tableone_by_pa_2020.docx
-#
 # install.packages(c("tidyverse","survey","broom","janitor","readr",
 #                    "emmeans","splines","ggplot2","officer","flextable","forcats","tableone"))
 
@@ -270,10 +261,39 @@ doc2 <- body_add_par(doc2, note_txt, style = "Normal")
 
 print(doc2, target = "tableone_by_pa_2020.docx")
 
-message("✓ Wrote: ",
-        "\n  - trend_test_2020.txt",
-        "\n  - fig_dose_response_hicp_pa_2020.png",
-        "\n  - adjusted_rates_by_pa_2020.csv",
-        "\n  - adjusted_rates_by_pa_2020.docx",
-        "\n  - tableone_by_pa_2020.csv",
-        "\n  - tableone_by_pa_2020.docx")
+# ===== (A) Weighted overall HICP prevalence (with 95% CI) =====
+ov <- svymean(~ I(hicp == 1), design = des)
+ov_ci <- confint(ov)
+
+ov_tbl <- data.frame(
+  Measure = "Overall HICP prevalence",
+  Estimate_percent = 100 * as.numeric(ov),
+  CI_95 = sprintf("%.1f–%.1f", 100 * ov_ci[1], 100 * ov_ci[2])
+)
+readr::write_csv(ov_tbl, "HICP_overall_weighted_2020.csv")
+
+# Optional DOCX export
+library(officer); library(flextable)
+doc_ov <- read_docx()
+doc_ov <- body_add_par(doc_ov, "Overall weighted HICP prevalence — NHIS 2020", style = "table title")
+doc_ov <- body_add_flextable(doc_ov, regulartable(ov_tbl) |> autofit())
+doc_ov <- body_add_par(doc_ov, "Note: Weighted with WTFA_A; SEs/CIs use Taylor linearization with PSTRAT/PPSU.", style = "Normal")
+print(doc_ov, target = "HICP_overall_weighted_2020.docx")
+
+# Unadjusted, weighted HICP prevalence by PA (with 95% CI)
+by_pa <- svyby(~ hicp1, ~ pa_cat, des, svymean, vartype = "ci", na.rm = TRUE)
+
+by_pa_out <- by_pa |>
+  dplyr::transmute(
+    `PA category` = pa_cat,
+    `HICP % (unadjusted)` = 100 * hicp1,
+    `95% CI` = sprintf("%.1f–%.1f", 100 * ci_l, 100 * ci_u)
+  )
+
+readr::write_csv(by_pa_out, "HICP_by_PA_unadjusted_weighted_2020.csv")
+
+doc_pa <- read_docx()
+doc_pa <- body_add_par(doc_pa, "Unadjusted, weighted HICP prevalence by PA category — NHIS 2020", style = "table title")
+doc_pa <- body_add_flextable(doc_pa, regulartable(by_pa_out) |> autofit())
+doc_pa <- body_add_par(doc_pa, "Note: Weighted with WTFA_A; SEs/CIs use Taylor linearization with PSTRAT/PPSU.", style = "Normal")
+print(doc_pa, target = "HICP_by_PA_unadjusted_weighted_2020.docx")
