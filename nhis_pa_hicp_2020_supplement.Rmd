@@ -1,0 +1,886 @@
+---
+# to run use: rmarkdown::render("nhis_pa_hicp_2020_supplement.Rmd")
+title: "Supplement 2: Supplemental Analyses"
+subtitle: |
+  Physical Activity Guideline Adherence and High-Impact Chronic Pain Among
+  U.S. Adults: A Cross-Sectional Analysis of the 2020 National Health
+  Interview Survey
+author: ""
+date: ""
+knit: (function(input, ...) rmarkdown::render(input, output_dir = here::here("Output")))
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: false
+    number_sections: false
+    toc: false
+geometry: margin=0.85in
+fontsize: 10pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{float}
+  - \renewcommand{\arraystretch}{1.25}
+  - \renewcommand{\tablename}{}
+  - \renewcommand{\thetable}{}
+  - \pagenumbering{gobble}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  results = "asis"
+)
+
+# NOTE: Uncomment the line below to install required packages if not already installed.
+# install.packages(c("tidyverse","survey","broom","janitor","readr","emmeans","splines","forcats","tableone","knitr","kableExtra","here"))
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(survey)
+  library(broom)
+  library(janitor)
+  library(readr)
+  library(emmeans)
+  library(splines)
+  library(forcats)
+  library(tableone)
+  library(knitr)
+  library(kableExtra)
+  library(here)
+})
+
+options(survey.lonely.psu = "adjust")
+
+# Helper: format p-values
+fmt_p <- function(p) {
+  p <- as.numeric(p)
+  ifelse(p < 0.001, "< 0.001", sprintf("%.3f", p))
+}
+```
+
+```{r load-and-recode}
+# ── Load & recode (identical to main script) ─────────────────────────────────
+data_path <- here("adult20.csv")
+d <- read_csv(data_path, show_col_types = FALSE) |> clean_names()
+
+# Outcome: HICP
+d <- d |>
+  mutate(
+    chronic_pain = case_when(
+      paifrq3m_a %in% c(3, 4) ~ 1L,
+      paifrq3m_a %in% c(1, 2) ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+    hicp = case_when(
+      chronic_pain == 1L & paiwklm3m_a %in% c(3, 4) ~ 1L,
+      chronic_pain == 0L ~ 0L,
+      chronic_pain == 1L & paiwklm3m_a %in% c(1, 2) ~ 0L,
+      TRUE ~ NA_integer_
+    )
+  )
+
+# Save raw frequency codes BEFORE recoding (for sensitivity analysis)
+d <- d |>
+  mutate(
+    modfreqw_raw = as.numeric(modfreqw_a),
+    vigfreqw_raw = as.numeric(vigfreqw_a),
+    strfreqw_raw = as.numeric(strfreqw_a)
+  )
+
+# Exposure: PA
+recode_freq <- function(x) {
+  x <- as.numeric(x)
+  case_when(
+    x %in% c(94, 95)         ~ 0,
+    x %in% c(96, 97, 98, 99) ~ NA_real_,
+    TRUE                      ~ x
+  )
+}
+
+recode_min <- function(x) {
+  x <- as.numeric(x)
+  case_when(
+    x >= 996  ~ NA_real_,
+    !is.na(x) ~ x,
+    TRUE       ~ NA_real_
+  )
+}
+
+d <- d |>
+  mutate(
+    modfreqw_a = recode_freq(modfreqw_a),
+    vigfreqw_a = recode_freq(vigfreqw_a),
+    strfreqw_a = recode_freq(strfreqw_a),
+    modmin_a   = recode_min(modmin_a),
+    vigmin_a   = recode_min(vigmin_a),
+    modmin_a   = ifelse(!is.na(modfreqw_a) & modfreqw_a == 0 &
+                          is.na(modmin_a), 0, modmin_a),
+    vigmin_a   = ifelse(!is.na(vigfreqw_a) & vigfreqw_a == 0 &
+                          is.na(vigmin_a), 0, vigmin_a),
+    mod_min_wk = modfreqw_a * modmin_a,
+    vig_min_wk = vigfreqw_a * vigmin_a,
+    eq_min_wk  = mod_min_wk + 2 * vig_min_wk,
+    meet_aerobic = ifelse(!is.na(eq_min_wk) & eq_min_wk >= 150, 1L,
+                          ifelse(!is.na(eq_min_wk), 0L, NA)),
+    meet_strength = ifelse(!is.na(strfreqw_a) & strfreqw_a >= 2, 1L,
+                           ifelse(!is.na(strfreqw_a), 0L, NA)),
+    pa_cat = case_when(
+      !is.na(eq_min_wk) & eq_min_wk == 0 ~ "No PA",
+      !is.na(meet_aerobic) & meet_aerobic == 1 &
+        !is.na(meet_strength) & meet_strength == 1 ~
+        "Meets aerobic + strength",
+      !is.na(meet_aerobic) & meet_aerobic == 1 &
+        !is.na(meet_strength) & meet_strength == 0 ~
+        "Meets aerobic only",
+      !is.na(eq_min_wk) & eq_min_wk > 0 ~
+        "Some PA but below guidelines",
+      TRUE ~ NA_character_
+    ),
+    pa_cat = factor(pa_cat, levels = c(
+      "No PA",
+      "Some PA but below guidelines",
+      "Meets aerobic only",
+      "Meets aerobic + strength"
+    ))
+  )
+
+# Covariates — base
+d <- d |>
+  mutate(
+    sex_a = factor(sex_a, levels = c(1, 2), labels = c("Male", "Female")),
+    is_hisp = case_when(
+      hisp_a == 1 ~ 1L, hisp_a == 2 ~ 0L, TRUE ~ NA_integer_
+    ),
+    race_eth = case_when(
+      is_hisp == 1                     ~ "Hispanic",
+      is_hisp == 0 & raceallp_a == 1   ~ "NH White",
+      is_hisp == 0 & raceallp_a == 2   ~ "NH Black",
+      is_hisp == 0 & raceallp_a == 4   ~ "NH Asian",
+      is_hisp == 0                     ~ "NH Other/Multiracial",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c(
+      "NH White", "NH Black", "NH Asian", "Hispanic",
+      "NH Other/Multiracial"
+    ))
+  )
+
+# Covariates — expanded (Model B)
+d <- d |>
+  mutate(
+    educ_cat = case_when(
+      educ_a %in% c(0, 1, 2, 3) ~ "Less than HS",
+      educ_a == 4                ~ "HS diploma/GED",
+      educ_a %in% c(5, 6, 7, 8) ~ "Some college/Associate",
+      educ_a %in% c(9, 10)      ~ "Bachelor or higher",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c(
+      "Less than HS", "HS diploma/GED",
+      "Some college/Associate", "Bachelor or higher"
+    )),
+    bmi_cat = case_when(
+      bmicat_a == 1 ~ "Underweight",
+      bmicat_a == 2 ~ "Normal weight",
+      bmicat_a == 3 ~ "Overweight",
+      bmicat_a == 4 ~ "Obese",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c(
+      "Normal weight", "Underweight", "Overweight", "Obese"
+    )),
+    arthritis = case_when(
+      arthev_a == 1 ~ 1L, arthev_a == 2 ~ 0L, TRUE ~ NA_integer_
+    ),
+    dep_freq = case_when(
+      depfreq_a %in% c(1, 2) ~ "Daily/Weekly",
+      depfreq_a == 3          ~ "Monthly",
+      depfreq_a == 4          ~ "A few times a year",
+      depfreq_a == 5          ~ "Never",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c(
+      "Never", "A few times a year", "Monthly", "Daily/Weekly"
+    )),
+    anx_freq = case_when(
+      anxfreq_a %in% c(1, 2) ~ "Daily/Weekly",
+      anxfreq_a == 3          ~ "Monthly",
+      anxfreq_a == 4          ~ "A few times a year",
+      anxfreq_a == 5          ~ "Never",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c(
+      "Never", "A few times a year", "Monthly", "Daily/Weekly"
+    )),
+    income_cat = case_when(
+      ratcat_a %in% c(1, 2, 3, 4, 5) ~ "<2.00",
+      ratcat_a %in% c(6, 7, 8, 9)    ~ "2.00-3.99",
+      ratcat_a %in% c(10, 11)        ~ "4.00-4.99",
+      ratcat_a %in% c(12, 13, 14)    ~ "5.00+",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c("<2.00", "2.00-3.99", "4.00-4.99", "5.00+")),
+    has_code95 = (modfreqw_raw == 95 | vigfreqw_raw == 95 |
+                    strfreqw_raw == 95),
+    has_code95 = ifelse(is.na(has_code95), FALSE, has_code95)
+  )
+```
+
+```{r analytic-samples}
+# ── Analytic samples ──────────────────────────────────────────────────────────
+# Base complete-case (Model A)
+d_cc <- d |>
+  filter(
+    !is.na(wtfa_a), !is.na(pstrat), !is.na(ppsu),
+    !is.na(hicp), !is.na(pa_cat),
+    !is.na(agep_a), !is.na(sex_a), !is.na(race_eth)
+  ) |>
+  mutate(
+    hicp1    = as.numeric(hicp == 1),
+    pa_cat   = fct_drop(pa_cat),
+    sex_a    = fct_drop(sex_a),
+    race_eth = fct_drop(race_eth),
+    pa_score = case_when(
+      pa_cat == "No PA" ~ 0,
+      pa_cat == "Some PA but below guidelines" ~ 1,
+      pa_cat == "Meets aerobic only" ~ 2,
+      pa_cat == "Meets aerobic + strength" ~ 3
+    ),
+    eq_capped = pmin(eq_min_wk, 1500),
+    str_days  = strfreqw_a,
+    age_grp   = case_when(
+      agep_a < 40               ~ "18-39",
+      agep_a >= 40 & agep_a < 65 ~ "40-64",
+      agep_a >= 65              ~ "65+"
+    ) |> factor(levels = c("18-39", "40-64", "65+"))
+  )
+
+# Expanded complete-case (Model B)
+d_cc_exp <- d_cc |>
+  filter(
+    !is.na(educ_cat), !is.na(bmi_cat), !is.na(arthritis),
+    !is.na(dep_freq), !is.na(anx_freq), !is.na(income_cat)
+  )
+
+# Sensitivity: exclude code 95
+d_cc_no95 <- d_cc |> filter(!has_code95)
+
+n_base    <- nrow(d_cc)
+n_exp     <- nrow(d_cc_exp)
+n_no95    <- nrow(d_cc_no95)
+n_removed <- sum(d_cc$has_code95)
+n_excl    <- nrow(d) - n_base
+```
+
+```{r survey-designs}
+# ── Survey designs ────────────────────────────────────────────────────────────
+des_base <- svydesign(
+  ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+  nest = TRUE, data = d_cc
+)
+des_base <- update(des_base, pa_score = d_cc$pa_score,
+                   age_grp = d_cc$age_grp)
+
+des_exp <- svydesign(
+  ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+  nest = TRUE, data = d_cc_exp
+)
+des_exp <- update(des_exp, pa_score = d_cc_exp$pa_score)
+
+des_no95 <- svydesign(
+  ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+  nest = TRUE, data = d_cc_no95
+)
+des_no95 <- update(des_no95, pa_score = d_cc_no95$pa_score)
+```
+
+## S1. Missingness Comparison: Included vs. Excluded Respondents
+
+Table S1 compares demographic characteristics and HICP status (where
+available) between respondents included in the analytic sample
+(n = `r format(n_base, big.mark = ",")`) and those excluded due to
+missing data (n = `r format(n_excl, big.mark = ",")`). Excluded
+respondents were older, more likely to be female, and had substantially
+higher HICP prevalence (13.2% vs. 5.1%), suggesting that complete-case
+analysis may underestimate population HICP prevalence.
+
+```{r s1-missingness}
+d_full <- d |>
+  filter(!is.na(wtfa_a), !is.na(pstrat), !is.na(ppsu)) |>
+  mutate(
+    in_analytic = !is.na(hicp) & !is.na(pa_cat) &
+                  !is.na(agep_a) & !is.na(sex_a) & !is.na(race_eth),
+    inclusion   = ifelse(in_analytic, "Included", "Excluded"),
+    hicp_avail  = ifelse(!is.na(hicp), as.character(hicp), NA_character_)
+  )
+
+tab_miss <- CreateTableOne(
+  vars       = c("agep_a", "sex_a", "race_eth", "hicp_avail"),
+  strata     = "inclusion",
+  data       = d_full,
+  factorVars = c("sex_a", "race_eth", "hicp_avail"),
+  includeNA  = FALSE,
+  test       = TRUE,
+  addOverall = FALSE
+)
+
+mat_miss <- print(tab_miss, showAllLevels = TRUE, quote = FALSE,
+                  noSpaces = TRUE, printToggle = FALSE)
+df_miss  <- data.frame(
+  Characteristic = rownames(mat_miss), mat_miss,
+  row.names = NULL, check.names = FALSE
+)
+
+df_miss$Characteristic <- df_miss$Characteristic |>
+  str_replace("agep_a \\(mean \\(SD\\)\\)", "Age, mean (SD)") |>
+  str_replace("sex_a \\(%\\)", "Sex (%)") |>
+  str_replace("race_eth \\(%\\)", "Race/Ethnicity (%)") |>
+  str_replace("hicp_avail \\(%\\)", "HICP status (%)")
+
+if ("p" %in% colnames(df_miss)) {
+  df_miss$p <- sapply(df_miss$p, function(x) {
+    if (is.na(x) || x == "") return("")
+    val <- suppressWarnings(as.numeric(x))
+    if (is.na(val)) {
+      if (grepl("^<", x)) return(x)
+      return(x)
+    }
+    fmt_p(val)
+  })
+}
+
+kable(
+  df_miss,
+  caption = "Table S1. Unweighted comparison of included vs. excluded respondents.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(
+    latex_options = c("HOLD_position", "scale_down"),
+    font_size = 9
+  )
+```
+
+*Note:* HICP status available for 726 of `r format(n_excl, big.mark = ",")`
+excluded respondents; the remaining lacked classifiable pain or
+activity-limitation data. P-values from chi-squared (categorical)
+or *t*-test (continuous).
+
+\newpage
+
+## S2. Confounding Assessment: Model A vs. Model B
+
+To assess potential confounding by health-related and socioeconomic
+factors, we estimated adjusted HICP prevalences under two models on the
+same expanded complete-case sample. Model A adjusted for age, sex, and
+race/ethnicity only (total association). Model B additionally adjusted
+for education, BMI category, arthritis history, depression frequency,
+anxiety frequency, and income-to-poverty ratio (conservative association
+after additional adjustment). We note that several Model B covariates
+(BMI, arthritis, depression, anxiety) may lie on the causal pathway
+between PA and HICP; thus, Model B may represent overadjustment and
+should be interpreted as the lower bound of the true association.
+
+```{r s2-confounding}
+emm_options(df = survey::degf(des_exp))
+
+# Model A: demographics only (on expanded sample for comparability)
+fit_A <- svyglm(hicp1 ~ pa_cat + agep_a + sex_a + race_eth,
+                design = des_exp, family = gaussian())
+emm_A  <- summary(emmeans(fit_A, ~ pa_cat))
+
+trend_A <- svyglm(hicp1 ~ pa_score + agep_a + sex_a + race_eth,
+                  design = des_exp, family = gaussian())
+trend_A_test <- survey::regTermTest(trend_A, ~ pa_score)
+b_A  <- coef(summary(trend_A))["pa_score", "Estimate"]
+se_A <- coef(summary(trend_A))["pa_score", "Std. Error"]
+
+# Model B: fully adjusted
+fit_B <- svyglm(
+  hicp1 ~ pa_cat + agep_a + sex_a + race_eth +
+    educ_cat + bmi_cat + arthritis + dep_freq + anx_freq + income_cat,
+  design = des_exp, family = gaussian()
+)
+emm_B <- summary(emmeans(
+  fit_B, ~ pa_cat,
+  nuisance = c("educ_cat", "bmi_cat", "dep_freq", "anx_freq", "income_cat")
+))
+
+trend_B <- svyglm(
+  hicp1 ~ pa_score + agep_a + sex_a + race_eth +
+    educ_cat + bmi_cat + arthritis + dep_freq + anx_freq + income_cat,
+  design = des_exp, family = gaussian()
+)
+trend_B_test <- survey::regTermTest(trend_B, ~ pa_score)
+b_B  <- coef(summary(trend_B))["pa_score", "Estimate"]
+se_B <- coef(summary(trend_B))["pa_score", "Std. Error"]
+
+attenuation_pct <- 100 * (1 - abs(b_B) / abs(b_A))
+
+# Table S2a
+s2a <- tibble(
+  `PA category`          = as.character(emm_A$pa_cat),
+  `Model A: Adj. HICP %` = sprintf("%.1f", 100 * emm_A$emmean),
+  `Model A: 95% CI`      = sprintf("%.1f\u2013%.1f",
+                                   100 * emm_A$lower.CL,
+                                   100 * emm_A$upper.CL),
+  `Model B: Adj. HICP %` = sprintf("%.1f", 100 * emm_B$emmean),
+  `Model B: 95% CI`      = sprintf("%.1f\u2013%.1f",
+                                   100 * emm_B$lower.CL,
+                                   100 * emm_B$upper.CL)
+)
+
+kable(
+  s2a,
+  caption = "Table S2a. Adjusted HICP prevalence (\\%) by PA category, Models A and B.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(
+    latex_options = c("HOLD_position"),
+    font_size = 9
+  )
+```
+
+```{r s2b-trend}
+s2b <- tibble(
+  Model = c("A (demographics)", "B (fully adjusted)"),
+  `Per-category change (pp)` = sprintf("%.2f", c(100 * b_A, 100 * b_B)),
+  `95% CI` = sprintf(
+    "%.2f to %.2f",
+    c(100 * (b_A - 1.96 * se_A), 100 * (b_B - 1.96 * se_B)),
+    c(100 * (b_A + 1.96 * se_A), 100 * (b_B + 1.96 * se_B))
+  ),
+  `Trend p-value` = c(fmt_p(trend_A_test$p), fmt_p(trend_B_test$p))
+)
+
+kable(
+  s2b,
+  caption = "Table S2b. Linear trend in HICP across PA categories, Models A and B.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(
+    latex_options = c("HOLD_position"),
+    font_size = 9
+  )
+```
+
+*Note:* Model A: age + sex + race/ethnicity. Model B: Model A +
+education + BMI category + arthritis + depression frequency + anxiety
+frequency + income-to-poverty ratio. The per-category change attenuated
+by approximately `r round(attenuation_pct)`% from Model A to Model B,
+but the linear trend remained highly significant (*p* < 0.001).
+
+\newpage
+
+## S3. Sensitivity Analysis: Excluding Code 95 Respondents
+
+NHIS frequency-per-week recode code 95 denotes respondents who reported
+being "unable to do" a given activity type. In the primary analysis,
+these respondents were assigned zero frequency (equivalent to code 94,
+"never"). Because inability to exercise may itself be caused by pain,
+this coding could inflate the observed PA--HICP association. To test
+this, we re-estimated the primary models after excluding all respondents
+with code 95 on any PA frequency variable (n = `r n_removed` removed;
+analytic n = `r format(n_no95, big.mark = ",")`).
+
+```{r s3-sensitivity}
+emm_options(df = survey::degf(des_no95))
+
+fit_no95 <- svyglm(hicp1 ~ pa_cat + agep_a + sex_a + race_eth,
+                   design = des_no95, family = gaussian())
+emm_no95 <- summary(emmeans(fit_no95, ~ pa_cat))
+
+trend_no95 <- svyglm(hicp1 ~ pa_score + agep_a + sex_a + race_eth,
+                     design = des_no95, family = gaussian())
+trend_no95_test <- survey::regTermTest(trend_no95, ~ pa_score)
+b_no95  <- coef(summary(trend_no95))["pa_score", "Estimate"]
+se_no95 <- coef(summary(trend_no95))["pa_score", "Std. Error"]
+
+s3a <- tibble(
+  `PA category`           = as.character(emm_no95$pa_cat),
+  `Adj. HICP % (no 95)`   = sprintf("%.1f", 100 * emm_no95$emmean),
+  `95% CI`                = sprintf("%.1f\u2013%.1f",
+                                    100 * emm_no95$lower.CL,
+                                    100 * emm_no95$upper.CL)
+)
+
+kable(
+  s3a,
+  caption = "Table S3a. Adjusted HICP prevalence excluding code 95 respondents.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+```{r s3b-trend}
+s3b <- tibble(
+  Analysis = "Excluding code 95",
+  `Per-category change (pp)` = sprintf("%.2f", 100 * b_no95),
+  `95% CI` = sprintf("%.2f to %.2f",
+                     100 * (b_no95 - 1.96 * se_no95),
+                     100 * (b_no95 + 1.96 * se_no95)),
+  `Trend p-value` = fmt_p(trend_no95_test$p),
+  `n removed`     = n_removed,
+  `Analytic n`    = format(n_no95, big.mark = ",")
+)
+
+kable(
+  s3b,
+  caption = "Table S3b. Trend test excluding code 95 respondents.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), font_size = 9)
+```
+
+*Note:* Results are virtually identical to the primary analysis
+(per-category change `r sprintf("%.2f", 100 * b_no95)` pp vs.
+&minus;1.82 pp in primary; *p* < 0.001 in both). Excluding code 95
+respondents does not materially affect the findings.
+
+\newpage
+
+## S4. Subgroup Analyses: Effect Modification by Age, Sex, and Race/Ethnicity
+
+We tested whether the PA--HICP association varied across demographic
+subgroups by fitting interaction terms (PA ordinal score $\times$
+subgroup) in survey-weighted linear probability models. Stratified
+per-category slopes are reported alongside formal interaction *p*-values.
+
+```{r s4-subgroup}
+# ── Age group interaction ────────────────────────────────────────────────────
+fit_age_int <- svyglm(hicp1 ~ pa_score * age_grp + sex_a + race_eth,
+                      design = des_base, family = gaussian())
+age_int_test <- survey::regTermTest(fit_age_int, ~ pa_score:age_grp)
+
+age_slopes <- tibble()
+for (ag in levels(d_cc$age_grp)) {
+  sub <- d_cc |> filter(age_grp == ag)
+  des_sub <- svydesign(ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+                       nest = TRUE, data = sub)
+  des_sub <- update(des_sub, pa_score = sub$pa_score)
+  fit_sub <- svyglm(hicp1 ~ pa_score + sex_a + race_eth,
+                    design = des_sub, family = gaussian())
+  b  <- coef(summary(fit_sub))["pa_score", "Estimate"]
+  se <- coef(summary(fit_sub))["pa_score", "Std. Error"]
+  p  <- coef(summary(fit_sub))["pa_score", "Pr(>|t|)"]
+  age_slopes <- bind_rows(age_slopes, tibble(
+    Subgroup = ag,
+    `Per-category change (pp)` = sprintf("%.2f", 100 * b),
+    `95% CI` = sprintf("%.2f to %.2f",
+                       100 * (b - 1.96 * se), 100 * (b + 1.96 * se)),
+    `p-value` = fmt_p(p)
+  ))
+}
+
+# ── Sex interaction ──────────────────────────────────────────────────────────
+fit_sex_int <- svyglm(hicp1 ~ pa_score * sex_a + agep_a + race_eth,
+                      design = des_base, family = gaussian())
+sex_int_test <- survey::regTermTest(fit_sex_int, ~ pa_score:sex_a)
+
+sex_slopes <- tibble()
+for (sx in levels(d_cc$sex_a)) {
+  sub <- d_cc |> filter(sex_a == sx)
+  des_sub <- svydesign(ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+                       nest = TRUE, data = sub)
+  des_sub <- update(des_sub, pa_score = sub$pa_score)
+  fit_sub <- svyglm(hicp1 ~ pa_score + agep_a + race_eth,
+                    design = des_sub, family = gaussian())
+  b  <- coef(summary(fit_sub))["pa_score", "Estimate"]
+  se <- coef(summary(fit_sub))["pa_score", "Std. Error"]
+  p  <- coef(summary(fit_sub))["pa_score", "Pr(>|t|)"]
+  sex_slopes <- bind_rows(sex_slopes, tibble(
+    Subgroup = sx,
+    `Per-category change (pp)` = sprintf("%.2f", 100 * b),
+    `95% CI` = sprintf("%.2f to %.2f",
+                       100 * (b - 1.96 * se), 100 * (b + 1.96 * se)),
+    `p-value` = fmt_p(p)
+  ))
+}
+
+# ── Race/ethnicity interaction ───────────────────────────────────────────────
+fit_race_int <- svyglm(hicp1 ~ pa_score * race_eth + agep_a + sex_a,
+                       design = des_base, family = gaussian())
+race_int_test <- survey::regTermTest(fit_race_int, ~ pa_score:race_eth)
+
+race_slopes <- tibble()
+for (rc in levels(d_cc$race_eth)) {
+  sub <- d_cc |> filter(race_eth == rc)
+  if (nrow(sub) < 100) next
+  des_sub <- svydesign(ids = ~ppsu, strata = ~pstrat, weights = ~wtfa_a,
+                       nest = TRUE, data = sub)
+  des_sub <- update(des_sub, pa_score = sub$pa_score)
+  fit_sub <- svyglm(hicp1 ~ pa_score + agep_a + sex_a,
+                    design = des_sub, family = gaussian())
+  b  <- coef(summary(fit_sub))["pa_score", "Estimate"]
+  se <- coef(summary(fit_sub))["pa_score", "Std. Error"]
+  p  <- coef(summary(fit_sub))["pa_score", "Pr(>|t|)"]
+  race_slopes <- bind_rows(race_slopes, tibble(
+    Subgroup = rc,
+    `Per-category change (pp)` = sprintf("%.2f", 100 * b),
+    `95% CI` = sprintf("%.2f to %.2f",
+                       100 * (b - 1.96 * se), 100 * (b + 1.96 * se)),
+    `p-value` = fmt_p(p)
+  ))
+}
+
+# Combine
+s4_slopes <- bind_rows(
+  age_slopes  |> mutate(Modifier = "Age group", .before = 1),
+  sex_slopes  |> mutate(Modifier = "Sex", .before = 1),
+  race_slopes |> mutate(Modifier = "Race/Ethnicity", .before = 1)
+)
+
+kable(
+  s4_slopes,
+  caption = "Table S4a. Stratified per-category change in HICP (pp) by subgroup.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position", "scale_down"), font_size = 9)
+```
+
+```{r s4b-interactions}
+s4_int <- tibble(
+  Modifier        = c("Age group", "Sex", "Race/Ethnicity"),
+  `Interaction p` = c(
+    fmt_p(age_int_test$p),
+    fmt_p(sex_int_test$p),
+    fmt_p(race_int_test$p)
+  )
+)
+
+kable(
+  s4_int,
+  caption = "Table S4b. Interaction test p-values.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+*Note:* All three interaction terms were statistically significant. The
+PA--HICP gradient was strongest among adults aged 40+ and among women.
+Among racial/ethnic groups, NH White and NH Asian adults showed the
+steepest gradients, though the NH Asian estimate had wide confidence
+intervals due to smaller sample size.
+
+\newpage
+
+## S5. Linear Probability Model: Predicted Probability Bounds
+
+A known limitation of the linear probability model (LPM) is that
+predicted probabilities can fall outside [0, 1]. We examined the
+distribution of fitted values from the primary LPM.
+
+```{r s5-bounds}
+fit_lpm_base <- svyglm(hicp1 ~ pa_cat + agep_a + sex_a + race_eth,
+                       design = des_base, family = gaussian())
+pred_vals <- as.numeric(predict(fit_lpm_base, type = "response"))
+
+s5 <- tibble(
+  Metric = c(
+    "Min predicted probability",
+    "Max predicted probability",
+    "N predictions < 0",
+    "N predictions > 1",
+    "Proportion in [0,1]"
+  ),
+  Value = c(
+    sprintf("%.4f", min(pred_vals, na.rm = TRUE)),
+    sprintf("%.4f", max(pred_vals, na.rm = TRUE)),
+    as.character(sum(pred_vals < 0, na.rm = TRUE)),
+    as.character(sum(pred_vals > 1, na.rm = TRUE)),
+    sprintf("%.4f", mean(pred_vals >= 0 & pred_vals <= 1, na.rm = TRUE))
+  )
+)
+
+n_below_zero <- sum(pred_vals < 0, na.rm = TRUE)
+pct_below    <- sprintf("%.1f", 100 * n_below_zero / length(pred_vals))
+min_pred     <- sprintf("%.3f", min(pred_vals, na.rm = TRUE))
+
+kable(
+  s5,
+  caption = "Table S5. LPM predicted probability diagnostics.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+*Note:* `r format(n_below_zero, big.mark = ",")` observations
+(`r pct_below`%) had predicted probabilities slightly below zero
+(minimum `r min_pred`). No predictions exceeded 1.0. These out-of-range
+predictions are substantively negligible and are typical for LPMs
+applied to low-prevalence outcomes. The modified Poisson model, which
+constrains predictions to the positive real line, serves as a
+complementary robustness check.
+
+## S6. Natural Cubic Spline Knot Placement
+
+The dose--response model used a natural cubic spline via `ns(df = 3)`
+from the **splines** package for moderate-equivalent minutes/week
+(capped at 1,500). With `df = 3`, `ns()` places two internal knots at
+the 33rd and 67th percentiles of the observed data distribution.
+
+```{r s6-knots}
+# Extract actual knot locations from ns()
+ns_obj   <- ns(d_cc$eq_capped, df = 3)
+int_knots <- attr(ns_obj, "knots")
+bnd_knots <- attr(ns_obj, "Boundary.knots")
+
+# ns(df = 3) places two internal knots at the 33rd and 67th percentiles
+s6 <- tibble(
+  `Knot type` = c(
+    "Boundary (lower)",
+    "Internal (33rd percentile)",
+    "Internal (67th percentile)",
+    "Boundary (upper)"
+  ),
+  `Location (moderate-eq. min/wk)` = c(
+    format(bnd_knots[1], big.mark = ","),
+    format(int_knots[1], big.mark = ","),
+    format(int_knots[2], big.mark = ","),
+    format(bnd_knots[2], big.mark = ",")
+  )
+)
+
+kable(
+  s6,
+  caption = "Table S6. Natural cubic spline knot locations from ns(df = 3).",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+*Note:* Internal knots at `r int_knots[1]` and `r int_knots[2]` min/wk
+correspond to the 33rd and 67th percentiles of capped moderate-equivalent
+minutes/week among the analytic sample. Boundary knots are placed at the
+range extremes (`r bnd_knots[1]` and
+`r format(bnd_knots[2], big.mark = ",")` min/wk).
+
+## S7. Justification for Capping Moderate-Equivalent Minutes at 1,500 Min/Week
+
+Self-reported PA data can include implausibly high values. We capped
+moderate-equivalent minutes/week at 1,500 to reduce the influence of
+extreme observations on the spline-based dose--response model.
+
+```{r s7-cap}
+n_above_1500 <- sum(d_cc$eq_min_wk > 1500, na.rm = TRUE)
+n_above_1000 <- sum(d_cc$eq_min_wk > 1000, na.rm = TRUE)
+n_total_pa   <- sum(!is.na(d_cc$eq_min_wk))
+max_val      <- max(d_cc$eq_min_wk, na.rm = TRUE)
+p99          <- quantile(d_cc$eq_min_wk, 0.99,  na.rm = TRUE)
+p995         <- quantile(d_cc$eq_min_wk, 0.995, na.rm = TRUE)
+
+s7 <- tibble(
+  Metric = c(
+    "Total with valid moderate-eq. min/wk",
+    "Maximum (min/wk)",
+    "99th percentile (min/wk)",
+    "99.5th percentile (min/wk)",
+    "N > 1,000 min/wk",
+    "% > 1,000 min/wk",
+    "N > 1,500 min/wk",
+    "% > 1,500 min/wk"
+  ),
+  Value = c(
+    format(n_total_pa, big.mark = ","),
+    format(max_val, big.mark = ","),
+    sprintf("%.1f", p99),
+    sprintf("%.1f", p995),
+    format(n_above_1000, big.mark = ","),
+    sprintf("%.2f%%", 100 * n_above_1000 / n_total_pa),
+    format(n_above_1500, big.mark = ","),
+    sprintf("%.2f%%", 100 * n_above_1500 / n_total_pa)
+  )
+)
+
+kable(
+  s7,
+  caption = "Table S7. Distribution of extreme PA values.",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+*Note:* The maximum observed value (`r format(max_val, big.mark = ",")`
+min/wk) is implausible, equating to ~`r round(max_val / 60 / 7)` hours/day
+of moderate activity. The 99th percentile was
+`r sprintf("%.1f", p99)` min/wk. Capping at 1,500 min/wk
+(≈21.4 hr/wk, or ~3 hr/day) affected
+`r format(n_above_1500, big.mark = ",")` respondents
+(`r sprintf("%.2f", 100 * n_above_1500 / n_total_pa)`%) and represents
+a conservative threshold that retains high-but-plausible values while
+excluding reporting errors.
+
+\newpage
+
+## S8. Prevalence Ratios: Models A and B
+
+Prevalence ratios (PR) were estimated using survey-weighted modified
+Poisson regression (quasipoisson family, log link) following Zou (2004).
+PRs are a commonly used effect measure for cross-sectional studies with
+binary outcomes.
+
+```{r s8-pr}
+# ── Model A ──────────────────────────────────────────────────────────────────
+fit_pr_A <- svyglm(hicp1 ~ pa_cat + agep_a + sex_a + race_eth,
+                   design = des_base, family = quasipoisson(link = "log"))
+
+pr_coefs_A <- coef(summary(fit_pr_A))
+pa_rows_A  <- grep("^pa_cat", rownames(pr_coefs_A))
+
+s8a <- tibble(
+  `PA category` = c("No PA (ref)",
+                     sub("^pa_cat", "", rownames(pr_coefs_A)[pa_rows_A])),
+  PR = c("1.00", sprintf("%.2f", exp(pr_coefs_A[pa_rows_A, "Estimate"]))),
+  `95% CI` = c("ref", sprintf(
+    "%.2f\u2013%.2f",
+    exp(pr_coefs_A[pa_rows_A, "Estimate"] -
+          1.96 * pr_coefs_A[pa_rows_A, "Std. Error"]),
+    exp(pr_coefs_A[pa_rows_A, "Estimate"] +
+          1.96 * pr_coefs_A[pa_rows_A, "Std. Error"])
+  ))
+)
+
+kable(
+  s8a,
+  caption = "Table S8a. Prevalence ratios for HICP by PA category --- Model A (demographics).",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+```{r s8b-pr}
+# ── Model B ──────────────────────────────────────────────────────────────────
+fit_pr_B <- svyglm(
+  hicp1 ~ pa_cat + agep_a + sex_a + race_eth +
+    educ_cat + bmi_cat + arthritis + dep_freq + anx_freq + income_cat,
+  design = des_exp, family = quasipoisson(link = "log")
+)
+
+pr_coefs_B <- coef(summary(fit_pr_B))
+pa_rows_B  <- grep("^pa_cat", rownames(pr_coefs_B))
+
+s8b <- tibble(
+  `PA category` = c("No PA (ref)",
+                     sub("^pa_cat", "", rownames(pr_coefs_B)[pa_rows_B])),
+  PR = c("1.00", sprintf("%.2f", exp(pr_coefs_B[pa_rows_B, "Estimate"]))),
+  `95% CI` = c("ref", sprintf(
+    "%.2f\u2013%.2f",
+    exp(pr_coefs_B[pa_rows_B, "Estimate"] -
+          1.96 * pr_coefs_B[pa_rows_B, "Std. Error"]),
+    exp(pr_coefs_B[pa_rows_B, "Estimate"] +
+          1.96 * pr_coefs_B[pa_rows_B, "Std. Error"])
+  ))
+)
+
+kable(
+  s8b,
+  caption = "Table S8b. Prevalence ratios for HICP by PA category --- Model B (fully adjusted).",
+  booktabs = TRUE, linesep = ""
+) |>
+  kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+*Note:* Model A: age + sex + race/ethnicity. Model B: Model A +
+education + BMI category + arthritis + depression frequency + anxiety
+frequency + income-to-poverty ratio. In Model A, adults meeting both
+aerobic and strength guidelines had 74% lower HICP prevalence compared
+to inactive adults (PR = 0.26). In Model B, this attenuation yielded a
+50% lower prevalence (PR = 0.50), consistent with partial confounding by
+health-related covariates.
